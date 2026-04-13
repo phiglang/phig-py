@@ -4,13 +4,13 @@ from typing import IO, Any
 
 from ._error import PhigError
 
-_SPECIAL = frozenset("{}[]\"#'; \t\n\r")
+_SPECIAL = frozenset("{}[]\"#';")
 
 
 def _can_be_bare(s: str) -> bool:
     if not s:
         return False
-    return not any(c in _SPECIAL or c.isspace() for c in s)
+    return not any(c.isspace() or c in _SPECIAL for c in s)
 
 
 def _write_string(s: str, fp: IO[str]) -> None:

@@ -94,3 +94,27 @@ class TestErrors:
     def test_dumps_non_dict(self) -> None:
         with pytest.raises(phig.PhigError):
             phig.dumps("hello")  # type: ignore[arg-type]
+
+
+class TestUnicodeWhitespace:
+    def test_nbsp_not_separator(self) -> None:
+        with pytest.raises(phig.PhigError):
+            phig.loads("name\u00a0foo")
+
+    def test_nbsp_in_bare_value(self) -> None:
+        with pytest.raises(phig.PhigError):
+            phig.loads("name foo\u00a0bar")
+
+    def test_em_space_in_bare_value(self) -> None:
+        with pytest.raises(phig.PhigError):
+            phig.loads("name foo\u2003bar")
+
+    def test_nbsp_in_quoted_ok(self) -> None:
+        assert phig.loads('name "foo\u00a0bar"') == {"name": "foo\u00a0bar"}
+
+    def test_nbsp_in_raw_ok(self) -> None:
+        assert phig.loads("name 'foo\u00a0bar'") == {"name": "foo\u00a0bar"}
+
+    def test_dumps_quotes_nbsp(self) -> None:
+        text = phig.dumps({"name": "foo\u00a0bar"})
+        assert phig.loads(text) == {"name": "foo\u00a0bar"}
