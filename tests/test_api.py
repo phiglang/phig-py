@@ -1,4 +1,4 @@
-"""Tests for the public loads/dumps/load/dump API and pydantic integration."""
+"""Tests for the public loads/dumps/load/dump API."""
 
 from __future__ import annotations
 
@@ -94,5 +94,3 @@ class TestErrors:
     def test_dumps_non_dict(self) -> None:
         with pytest.raises(phig.PhigError):
             phig.dumps("hello")  # type: ignore[arg-type]
-
-
