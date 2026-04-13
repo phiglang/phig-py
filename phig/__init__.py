@@ -32,7 +32,7 @@ def loads(s: str) -> dict[str, Any]:
 
 def dump(data: Any, fp: IO[str]) -> None:
     """Serialize and write phig to a file object."""
-    _dump(_to_dict(data), fp)
+    _dump(data, fp)
 
 
 def dumps(data: Any) -> str:
@@ -41,20 +41,4 @@ def dumps(data: Any) -> str:
     >>> dumps({'name': 'foo', 'port': '8080'})
     'name foo\\nport 8080\\n'
     """
-    return _dumps(_to_dict(data))
-
-
-def _to_dict(obj: Any) -> Any:
-    if hasattr(obj, "__dataclass_fields__"):
-        import dataclasses
-
-        return dataclasses.asdict(obj)
-    if isinstance(obj, dict):
-        return {k: _to_dict(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_to_dict(v) for v in obj]
-    if isinstance(obj, bool):
-        return str(obj).lower()
-    if isinstance(obj, (int, float)):
-        return str(obj)
-    return obj
+    return _dumps(data)

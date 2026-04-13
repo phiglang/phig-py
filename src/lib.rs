@@ -1,52 +1,181 @@
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 pyo3::create_exception!(_phig, PhigError, pyo3::exceptions::PyException);
 
-fn value_to_py(py: Python<'_>, val: &phig::Value) -> PyResult<PyObject> {
-    Ok(match val {
-        phig::Value::String(s) => PyString::new(py, s).into_any().unbind(),
-        phig::Value::List(items) => {
-            let py_items: Vec<PyObject> = items
-                .iter()
-                .map(|v| value_to_py(py, v))
-                .collect::<PyResult<_>>()?;
-            PyList::new(py, py_items)?.into_any().unbind()
-        }
-        phig::Value::Map(pairs) => {
-            let dict = PyDict::new(py);
-            for (k, v) in pairs {
-                dict.set_item(k, value_to_py(py, v)?)?;
-            }
-            dict.into_any().unbind()
-        }
-    })
+enum PyPhigError {
+    Phig(phig::Error),
+    Python(PyErr),
 }
 
-fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<phig::Value> {
-    Ok(if let Ok(dict) = obj.downcast::<PyDict>() {
-        let mut pairs = Vec::new();
+impl From<phig::Error> for PyPhigError {
+    fn from(e: phig::Error) -> Self {
+        PyPhigError::Phig(e)
+    }
+}
+
+impl From<PyErr> for PyPhigError {
+    fn from(e: PyErr) -> Self {
+        PyPhigError::Python(e)
+    }
+}
+
+impl From<PyPhigError> for PyErr {
+    fn from(e: PyPhigError) -> Self {
+        match e {
+            PyPhigError::Phig(e) => PyErr::new::<PhigError, _>(e.to_string()),
+            PyPhigError::Python(e) => e,
+        }
+    }
+}
+
+struct PyHandler<'py> {
+    py: Python<'py>,
+    stack: Vec<PyBuildFrame<'py>>,
+    result: Option<PyObject>,
+}
+
+enum PyBuildFrame<'py> {
+    Map {
+        dict: Bound<'py, PyDict>,
+        pending_key: Option<String>,
+    },
+    List {
+        items: Vec<PyObject>,
+    },
+}
+
+impl<'py> PyHandler<'py> {
+    fn new(py: Python<'py>) -> Self {
+        PyHandler {
+            py,
+            stack: Vec::new(),
+            result: None,
+        }
+    }
+
+    fn finish(self) -> PyObject {
+        self.result.expect("no value produced")
+    }
+
+    fn push_value(&mut self, value: PyObject) -> Result<(), PyPhigError> {
+        match self.stack.last_mut() {
+            Some(PyBuildFrame::Map { dict, pending_key }) => {
+                let key = pending_key.take().expect("map value without key");
+                dict.set_item(key, value)?;
+            }
+            Some(PyBuildFrame::List { items }) => {
+                items.push(value);
+            }
+            None => {
+                self.result = Some(value);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'py> phig::parse::Handler for PyHandler<'py> {
+    type Error = PyPhigError;
+
+    fn map_start(&mut self) -> Result<(), PyPhigError> {
+        self.stack.push(PyBuildFrame::Map {
+            dict: PyDict::new(self.py),
+            pending_key: None,
+        });
+        Ok(())
+    }
+
+    fn map_end(&mut self) -> Result<(), PyPhigError> {
+        let frame = self.stack.pop().expect("unbalanced map_end");
+        match frame {
+            PyBuildFrame::Map { dict, .. } => self.push_value(dict.into_any().unbind()),
+            _ => panic!("map_end on non-map frame"),
+        }
+    }
+
+    fn list_start(&mut self) -> Result<(), PyPhigError> {
+        self.stack.push(PyBuildFrame::List { items: Vec::new() });
+        Ok(())
+    }
+
+    fn list_end(&mut self) -> Result<(), PyPhigError> {
+        let frame = self.stack.pop().expect("unbalanced list_end");
+        match frame {
+            PyBuildFrame::List { items } => {
+                let list = PyList::new(self.py, items)?.into_any().unbind();
+                self.push_value(list)
+            }
+            _ => panic!("list_end on non-list frame"),
+        }
+    }
+
+    fn key(&mut self, key: String) -> Result<(), PyPhigError> {
+        match self.stack.last_mut() {
+            Some(PyBuildFrame::Map { pending_key, .. }) => {
+                *pending_key = Some(key);
+            }
+            _ => panic!("key outside of map"),
+        }
+        Ok(())
+    }
+
+    fn string(&mut self, value: String) -> Result<(), PyPhigError> {
+        let py_str = PyString::new(self.py, &value).into_any().unbind();
+        self.push_value(py_str)
+    }
+}
+
+fn walk_py_obj<W: io::Write>(
+    obj: &Bound<'_, PyAny>,
+    fmt: &mut phig::fmt::Formatter<W>,
+) -> Result<(), PyPhigError> {
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        fmt.map_start()?;
         for (k, v) in dict.iter() {
             let key: String = k.extract()?;
-            pairs.push((key, py_to_value(&v)?));
+            fmt.key(key)?;
+            walk_py_obj(&v, fmt)?;
         }
-        phig::Value::Map(pairs)
+        fmt.map_end()?;
     } else if let Ok(list) = obj.downcast::<PyList>() {
-        let items = list
-            .iter()
-            .map(|item| py_to_value(&item))
-            .collect::<PyResult<Vec<_>>>()?;
-        phig::Value::List(items)
+        fmt.list_start()?;
+        for item in list.iter() {
+            walk_py_obj(&item, fmt)?;
+        }
+        fmt.list_end()?;
+    } else if obj.hasattr("__dataclass_fields__")? {
+        let fields = obj.getattr("__dataclass_fields__")?;
+        let field_dict: &Bound<PyDict> = fields
+            .downcast()
+            .map_err(|e| PyPhigError::Python(e.into()))?;
+        fmt.map_start()?;
+        for (key_obj, _) in field_dict.iter() {
+            let key: String = key_obj.extract()?;
+            let value = obj.getattr(key.as_str())?;
+            fmt.key(key)?;
+            walk_py_obj(&value, fmt)?;
+        }
+        fmt.map_end()?;
+    } else if let Ok(b) = obj.downcast::<PyBool>() {
+        fmt.string(if b.is_true() { "true" } else { "false" }.to_string())?;
     } else if let Ok(s) = obj.extract::<String>() {
-        phig::Value::String(s)
+        fmt.string(s)?;
+    } else if obj.is_instance_of::<PyInt>() || obj.is_instance_of::<PyFloat>() {
+        let s: String = obj.str()?.extract()?;
+        fmt.string(s)?;
     } else {
-        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        return Err(PyPhigError::Python(PyErr::new::<
+            pyo3::exceptions::PyTypeError,
+            _,
+        >(format!(
             "unsupported type: {}",
             obj.get_type().qualname()?
-        )));
-    })
+        ))));
+    }
+    Ok(())
 }
 
 /// Adapts a Python text file object (with a `.read(size)` method) into `std::io::Read`.
@@ -89,37 +218,49 @@ impl<'py> Write for PyWriter<'py> {
     }
 }
 
-fn to_py_err(e: phig::Error) -> PyErr {
-    PyErr::new::<PhigError, _>(e.to_string())
-}
-
 #[pyfunction]
 fn load(py: Python<'_>, fp: Bound<'_, PyAny>) -> PyResult<PyObject> {
     let reader = BufReader::new(PyReader { fp });
-    let value: phig::Value = phig::from_reader(reader).map_err(to_py_err)?;
-    value_to_py(py, &value)
+    let mut handler = PyHandler::new(py);
+    phig::parse::parse_events(reader, &mut handler)?;
+    Ok(handler.finish())
 }
 
 #[pyfunction]
 fn loads(py: Python<'_>, s: &str) -> PyResult<PyObject> {
-    let value: phig::Value = phig::from_str(s).map_err(to_py_err)?;
-    value_to_py(py, &value)
+    let mut handler = PyHandler::new(py);
+    phig::parse::parse_events(s.as_bytes(), &mut handler)?;
+    Ok(handler.finish())
+}
+
+fn check_top_level(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    if obj.downcast::<PyDict>().is_ok() || obj.hasattr("__dataclass_fields__")? {
+        Ok(())
+    } else {
+        Err(PyErr::new::<PhigError, _>("top-level value must be a map"))
+    }
 }
 
 #[pyfunction]
 fn dump(obj: &Bound<'_, PyAny>, fp: Bound<'_, PyAny>) -> PyResult<()> {
-    let value = py_to_value(obj)?;
-    let mut writer = BufWriter::new(PyWriter { fp });
-    phig::to_writer(&value, &mut writer).map_err(to_py_err)?;
-    writer
+    check_top_level(obj)?;
+    let writer = BufWriter::new(PyWriter { fp });
+    let mut fmt = phig::fmt::Formatter::new(writer);
+    walk_py_obj(obj, &mut fmt)?;
+    fmt.into_inner()
         .flush()
         .map_err(|e| PyErr::new::<PhigError, _>(e.to_string()))
 }
 
 #[pyfunction]
 fn dumps(obj: &Bound<'_, PyAny>) -> PyResult<String> {
-    let value = py_to_value(obj)?;
-    phig::to_string(&value).map_err(to_py_err)
+    check_top_level(obj)?;
+    let mut buf = Vec::new();
+    {
+        let mut fmt = phig::fmt::Formatter::new(&mut buf);
+        walk_py_obj(obj, &mut fmt)?;
+    }
+    Ok(String::from_utf8(buf).expect("phig output is always valid UTF-8"))
 }
 
 #[pymodule]
