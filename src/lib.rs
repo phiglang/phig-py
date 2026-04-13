@@ -6,47 +6,47 @@ use pyo3::types::{PyDict, PyList, PyString};
 pyo3::create_exception!(_phig, PhigError, pyo3::exceptions::PyException);
 
 fn value_to_py(py: Python<'_>, val: &phig::Value) -> PyResult<PyObject> {
-    match val {
-        phig::Value::String(s) => Ok(PyString::new(py, s).into_any().unbind()),
+    Ok(match val {
+        phig::Value::String(s) => PyString::new(py, s).into_any().unbind(),
         phig::Value::List(items) => {
             let py_items: Vec<PyObject> = items
                 .iter()
                 .map(|v| value_to_py(py, v))
                 .collect::<PyResult<_>>()?;
-            Ok(PyList::new(py, py_items)?.into_any().unbind())
+            PyList::new(py, py_items)?.into_any().unbind()
         }
         phig::Value::Map(pairs) => {
             let dict = PyDict::new(py);
             for (k, v) in pairs {
                 dict.set_item(k, value_to_py(py, v)?)?;
             }
-            Ok(dict.into_any().unbind())
+            dict.into_any().unbind()
         }
-    }
+    })
 }
 
 fn py_to_value(obj: &Bound<'_, PyAny>) -> PyResult<phig::Value> {
-    if let Ok(dict) = obj.downcast::<PyDict>() {
+    Ok(if let Ok(dict) = obj.downcast::<PyDict>() {
         let mut pairs = Vec::new();
         for (k, v) in dict.iter() {
             let key: String = k.extract()?;
             pairs.push((key, py_to_value(&v)?));
         }
-        Ok(phig::Value::Map(pairs))
+        phig::Value::Map(pairs)
     } else if let Ok(list) = obj.downcast::<PyList>() {
         let items = list
             .iter()
             .map(|item| py_to_value(&item))
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(phig::Value::List(items))
+        phig::Value::List(items)
     } else if let Ok(s) = obj.extract::<String>() {
-        Ok(phig::Value::String(s))
+        phig::Value::String(s)
     } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+        return Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
             "unsupported type: {}",
             obj.get_type().qualname()?
-        )))
-    }
+        )));
+    })
 }
 
 /// Adapts a Python text file object (with a `.read(size)` method) into `std::io::Read`.
@@ -75,8 +75,8 @@ struct PyWriter<'py> {
 
 impl<'py> Write for PyWriter<'py> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let s = std::str::from_utf8(buf)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let s =
+            std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.fp
             .call_method1("write", (s,))
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
@@ -111,7 +111,9 @@ fn dump(obj: &Bound<'_, PyAny>, fp: Bound<'_, PyAny>) -> PyResult<()> {
     let value = py_to_value(obj)?;
     let mut writer = BufWriter::new(PyWriter { fp });
     phig::to_writer(&value, &mut writer).map_err(to_py_err)?;
-    writer.flush().map_err(|e| PyErr::new::<PhigError, _>(e.to_string()))
+    writer
+        .flush()
+        .map_err(|e| PyErr::new::<PhigError, _>(e.to_string()))
 }
 
 #[pyfunction]
