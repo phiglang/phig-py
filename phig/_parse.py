@@ -178,12 +178,12 @@ class _Parser:
 
     _SPECIAL = frozenset("{}[]\"#';")
 
-    # BARE = /[^\s{}\[\]"#';]+/
+    # BARE = /[^\p{White_Space}{}[\]"#';]+/
     def bare(self) -> str | None:
         result: list[str] = []
         while self.peek() is not None:
             ch = self.peek()
-            if ch in self._WS or ch in self._SPECIAL:  # type: ignore[union-attr]
+            if ch.isspace() or ch in self._SPECIAL:  # type: ignore[union-attr]
                 break
             result.append(self.advance())  # type: ignore[arg-type]
         return "".join(result) if result else None
