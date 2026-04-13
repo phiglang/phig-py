@@ -1,0 +1,12 @@
+[package]
+name = "phig-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "_phig"
+crate-type = ["cdylib"]
+
+[dependencies]
+phig = "0.1.0"
+pyo3 = "0.23"

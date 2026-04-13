@@ -5,16 +5,20 @@ from __future__ import annotations
 import io
 from typing import IO, Any
 
-from ._error import PhigError
-from ._parse import parse
-from ._serialize import serialize
+from ._phig import (
+    PhigError,
+    dump as _dump,
+    dumps as _dumps,
+    load as _load,
+    loads as _loads,
+)
 
 __all__ = ["loads", "dumps", "load", "dump", "PhigError"]
 
 
 def load(fp: IO[str]) -> dict[str, Any]:
     """Read and parse phig from a file object."""
-    return parse(fp)
+    return _load(fp)
 
 
 def loads(s: str) -> dict[str, Any]:
@@ -23,12 +27,12 @@ def loads(s: str) -> dict[str, Any]:
     >>> loads('name foo\\nport 8080')
     {'name': 'foo', 'port': '8080'}
     """
-    return load(io.StringIO(s))
+    return _loads(s)
 
 
 def dump(data: Any, fp: IO[str]) -> None:
     """Serialize and write phig to a file object."""
-    serialize(_to_dict(data), fp)
+    _dump(_to_dict(data), fp)
 
 
 def dumps(data: Any) -> str:
@@ -37,9 +41,7 @@ def dumps(data: Any) -> str:
     >>> dumps({'name': 'foo', 'port': '8080'})
     'name foo\\nport 8080\\n'
     """
-    buf = io.StringIO()
-    dump(data, buf)
-    return buf.getvalue()
+    return _dumps(_to_dict(data))
 
 
 def _to_dict(obj: Any) -> Any:
