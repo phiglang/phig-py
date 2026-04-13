@@ -126,8 +126,15 @@ class _Parser:
                 elif esc == "0":
                     result.append("\0")
                     self.advance()
+                elif esc == "\r":
+                    # line continuation: \<CR><LF>
+                    self.advance()  # skip \r
+                    if self.peek() == "\n":
+                        self.advance()
+                    else:
+                        raise PhigError("expected LF after CR in line continuation", esc_start)
                 elif esc == "\n":
-                    # line continuation
+                    # line continuation: \<LF>
                     self.advance()
                 elif esc == "u":
                     self.advance()
