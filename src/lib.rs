@@ -5,6 +5,23 @@ use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 pyo3::create_exception!(_phig, PhigError, pyo3::exceptions::PyException);
 
+/// Wrapper to stash a `PyErr` inside an `io::Error`.
+struct PyErrWrapper(PyErr);
+
+impl std::fmt::Debug for PyErrWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PyErrWrapper({:?})", self.0)
+    }
+}
+
+impl std::fmt::Display for PyErrWrapper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for PyErrWrapper {}
+
 enum PyPhigError {
     Phig(phig::Error),
     Python(PyErr),
@@ -12,6 +29,16 @@ enum PyPhigError {
 
 impl From<phig::Error> for PyPhigError {
     fn from(e: phig::Error) -> Self {
+        // If the error wraps an io::Error that contains a PyErr, extract it.
+        if let phig::Error::Io(io_err) = e {
+            if let Some(wrapper) = io_err.into_inner() {
+                if let Ok(wrapper) = wrapper.downcast::<PyErrWrapper>() {
+                    return PyPhigError::Python(wrapper.0);
+                }
+            }
+            // Non-Python IO error — surface as PhigError
+            return PyPhigError::Phig(phig::Error::new("IO error"));
+        }
         PyPhigError::Phig(e)
     }
 }
@@ -188,9 +215,9 @@ impl<'py> Read for PyReader<'py> {
         let chunk: String = self
             .fp
             .call_method1("read", (buf.len(),))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, PyErrWrapper(e)))?
             .extract()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, PyErrWrapper(e)))?;
         let bytes = chunk.as_bytes();
         buf[..bytes.len()].copy_from_slice(bytes);
         Ok(bytes.len())
@@ -208,12 +235,14 @@ impl<'py> Write for PyWriter<'py> {
             std::str::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         self.fp
             .call_method1("write", (s,))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, PyErrWrapper(e)))?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let _ = self.fp.call_method0("flush");
+        self.fp
+            .call_method0("flush")
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, PyErrWrapper(e)))?;
         Ok(())
     }
 }
@@ -249,7 +278,8 @@ fn dump(obj: &Bound<'_, PyAny>, fp: Bound<'_, PyAny>) -> PyResult<()> {
     walk_py_obj(obj, &mut fmt)?;
     fmt.into_inner()
         .flush()
-        .map_err(|e| PyErr::new::<PhigError, _>(e.to_string()))
+        .map_err(|e| PyPhigError::from(phig::Error::from(e)))?;
+    Ok(())
 }
 
 #[pyfunction]
