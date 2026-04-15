@@ -3,7 +3,7 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
-use phig::parse::{Event, PhigParser};
+use phig::parse::{Event, Parser};
 
 pyo3::create_exception!(_phig, PhigError, pyo3::exceptions::PyException);
 
@@ -86,7 +86,7 @@ fn parse_to_pyobject(py: Python<'_>, reader: impl Read) -> Result<PyObject, PyPh
         Ok(())
     }
 
-    let mut parser = PhigParser::new(reader);
+    let mut parser = Parser::new(reader);
     let mut stack: Vec<Frame<'_>> = Vec::new();
     let mut result: Option<PyObject> = None;
 

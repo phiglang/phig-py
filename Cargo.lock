@@ -52,9 +52,9 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "phig"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "065a867e40151cdf7b1d9ae97a28396e53cf1a7d703df85fe6491f8113a7f3b0"
+checksum = "78201b3f98011c3002fa7510bd9839ac1afbef52bb60a325cd02b40fd437c8db"
 
 [[package]]
 name = "phig-py"
