@@ -3,6 +3,8 @@ use std::io::{self, BufReader, BufWriter, Read, Write};
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
+use phig::parse::{Event, PhigParser};
+
 pyo3::create_exception!(_phig, PhigError, pyo3::exceptions::PyException);
 
 /// Wrapper to stash a `PyErr` inside an `io::Error`.
@@ -58,101 +60,71 @@ impl From<PyPhigError> for PyErr {
     }
 }
 
-struct PyHandler<'py> {
-    py: Python<'py>,
-    stack: Vec<PyBuildFrame<'py>>,
-    result: Option<PyObject>,
-}
-
-enum PyBuildFrame<'py> {
-    Map {
-        dict: Bound<'py, PyDict>,
-        pending_key: Option<String>,
-    },
-    List {
-        items: Vec<PyObject>,
-    },
-}
-
-impl<'py> PyHandler<'py> {
-    fn new(py: Python<'py>) -> Self {
-        PyHandler {
-            py,
-            stack: Vec::new(),
-            result: None,
-        }
+fn parse_to_pyobject(py: Python<'_>, reader: impl Read) -> Result<PyObject, PyPhigError> {
+    enum Frame<'py> {
+        Map {
+            dict: Bound<'py, PyDict>,
+            pending_key: Option<String>,
+        },
+        List {
+            items: Vec<PyObject>,
+        },
     }
 
-    fn finish(self) -> PyObject {
-        self.result.expect("no value produced")
-    }
-
-    fn push_value(&mut self, value: PyObject) -> Result<(), PyPhigError> {
-        match self.stack.last_mut() {
-            Some(PyBuildFrame::Map { dict, pending_key }) => {
-                let key = pending_key.take().expect("map value without key");
-                dict.set_item(key, value)?;
+    fn push_value<'py>(
+        stack: &mut Vec<Frame<'py>>,
+        result: &mut Option<PyObject>,
+        value: PyObject,
+    ) -> Result<(), PyErr> {
+        match stack.last_mut() {
+            Some(Frame::Map { dict, pending_key }) => {
+                dict.set_item(pending_key.take().expect("map value without key"), value)?;
             }
-            Some(PyBuildFrame::List { items }) => {
-                items.push(value);
-            }
-            None => {
-                self.result = Some(value);
-            }
-        }
-        Ok(())
-    }
-}
-
-impl<'py> phig::parse::Handler for PyHandler<'py> {
-    type Error = PyPhigError;
-
-    fn map_start(&mut self) -> Result<(), PyPhigError> {
-        self.stack.push(PyBuildFrame::Map {
-            dict: PyDict::new(self.py),
-            pending_key: None,
-        });
-        Ok(())
-    }
-
-    fn map_end(&mut self) -> Result<(), PyPhigError> {
-        let frame = self.stack.pop().expect("unbalanced map_end");
-        match frame {
-            PyBuildFrame::Map { dict, .. } => self.push_value(dict.into_any().unbind()),
-            _ => panic!("map_end on non-map frame"),
-        }
-    }
-
-    fn list_start(&mut self) -> Result<(), PyPhigError> {
-        self.stack.push(PyBuildFrame::List { items: Vec::new() });
-        Ok(())
-    }
-
-    fn list_end(&mut self) -> Result<(), PyPhigError> {
-        let frame = self.stack.pop().expect("unbalanced list_end");
-        match frame {
-            PyBuildFrame::List { items } => {
-                let list = PyList::new(self.py, items)?.into_any().unbind();
-                self.push_value(list)
-            }
-            _ => panic!("list_end on non-list frame"),
-        }
-    }
-
-    fn key(&mut self, key: String) -> Result<(), PyPhigError> {
-        match self.stack.last_mut() {
-            Some(PyBuildFrame::Map { pending_key, .. }) => {
-                *pending_key = Some(key);
-            }
-            _ => panic!("key outside of map"),
+            Some(Frame::List { items }) => items.push(value),
+            None => *result = Some(value),
         }
         Ok(())
     }
 
-    fn string(&mut self, value: String) -> Result<(), PyPhigError> {
-        let py_str = PyString::new(self.py, &value).into_any().unbind();
-        self.push_value(py_str)
+    let mut parser = PhigParser::new(reader);
+    let mut stack: Vec<Frame<'_>> = Vec::new();
+    let mut result: Option<PyObject> = None;
+
+    for event in &mut parser {
+        let event = event?;
+        match event {
+            Event::StartMap => stack.push(Frame::Map {
+                dict: PyDict::new(py),
+                pending_key: None,
+            }),
+            Event::EndMap => {
+                let Frame::Map { dict, .. } = stack.pop().expect("unbalanced EndMap") else {
+                    panic!("EndMap on non-map frame");
+                };
+                push_value(&mut stack, &mut result, dict.into_any().unbind())?;
+            }
+            Event::StartList => stack.push(Frame::List { items: Vec::new() }),
+            Event::EndList => {
+                let Frame::List { items } = stack.pop().expect("unbalanced EndList") else {
+                    panic!("EndList on non-list frame");
+                };
+                let list = PyList::new(py, items)?.into_any().unbind();
+                push_value(&mut stack, &mut result, list)?;
+            }
+            Event::Key(k) => match stack.last_mut() {
+                Some(Frame::Map { pending_key, .. }) => {
+                    *pending_key = Some(k);
+                }
+                _ => panic!("Key outside of map"),
+            },
+            Event::String(s) => {
+                let obj = PyString::new(py, &s).into_any().unbind();
+                push_value(&mut stack, &mut result, obj)?;
+            }
+        }
     }
+
+    Ok(result.expect("no value produced"))
 }
 
 fn walk_py_obj<W: io::Write>(
@@ -250,16 +222,12 @@ impl<'py> Write for PyWriter<'py> {
 #[pyfunction]
 fn load(py: Python<'_>, fp: Bound<'_, PyAny>) -> PyResult<PyObject> {
     let reader = BufReader::new(PyReader { fp });
-    let mut handler = PyHandler::new(py);
-    phig::parse::parse_events(reader, &mut handler)?;
-    Ok(handler.finish())
+    Ok(parse_to_pyobject(py, reader)?)
 }
 
 #[pyfunction]
 fn loads(py: Python<'_>, s: &str) -> PyResult<PyObject> {
-    let mut handler = PyHandler::new(py);
-    phig::parse::parse_events(s.as_bytes(), &mut handler)?;
-    Ok(handler.finish())
+    Ok(parse_to_pyobject(py, s.as_bytes())?)
 }
 
 fn check_top_level(obj: &Bound<'_, PyAny>) -> PyResult<()> {
